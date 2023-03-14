@@ -16,6 +16,20 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
         result <- resultPromise.await
       } yield result
       assertZIO(sendMessageZIO)(Assertion.equalTo("Hello world"))
+    },
+    test("can send a message to an adapted destination") {
+      val actorSystem = new ActorSystem
+
+      val sendMessageZIO = for {
+        resultPromise <- Promise.make[Throwable, Int]
+        destination <- ZIO.succeed(actorSystem.promiseMessageDestination(resultPromise))
+        adapterDestination <- ZIO.succeed(actorSystem.adaptedMessageDestination(
+          (stringValue:String) => stringValue.length,
+          destination))
+        _ <- actorSystem.send("Hello world", adapterDestination)
+        result <- resultPromise.await
+      } yield result
+      assertZIO(sendMessageZIO)(Assertion.equalTo(11))
     }
   )
 }
