@@ -67,7 +67,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
             override type MessageType = BlackjackSupervisorMessage
 
             override def actorTemplate: Task[ActorTemplate[BlackjackSupervisorMessage]] = {
-              val value = HandlerActorTemplate((message: MessageType) => ZIO.succeed(true))
+              val value = ActorTemplate.handler((message: MessageType) => ZIO.succeed(true))
               ZIO.succeed(value)
             }
 
@@ -79,7 +79,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
             override type MessageType = PokerSupervisorMessage
 
             override def actorTemplate: Task[ActorTemplate[PokerSupervisorMessage]] = {
-              val value = HandlerActorTemplate((message: MessageType) => ZIO.succeed(true))
+              val value = ActorTemplate.handler((message: MessageType) => ZIO.succeed(true))
               ZIO.succeed(value)
             }
 
@@ -92,8 +92,9 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
           actorSystem <- initializeZIO
           resultPromise <- Promise.make[Throwable, String]
           destination <- ZIO.succeed(actorSystem.promiseMessageDestination(resultPromise))
+          directory <- actorSystem.directory
           _ <- actorSystem.send(BlackjackSupervisorMessage("Hello", replyTo = destination),
-            actorSystem.directory.blackjackSupervisor.get)
+            directory.blackjackSupervisor.get)
         } yield true
         assertZIO(testZIO)(Assertion.equalTo(true))
       }
