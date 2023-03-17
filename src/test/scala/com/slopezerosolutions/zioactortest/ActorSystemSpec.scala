@@ -19,7 +19,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
         actorSystem <- ActorSystem.initialize
         resultPromise <- Promise.make[Throwable, String]
         destination <- ZIO.succeed(actorSystem.promiseMessageDestination(resultPromise))
-        _ <- actorSystem.send("Hello world", destination)
+        _ <- destination.send("Hello world")
         result <- resultPromise.await
       } yield result
       assertZIO(sendMessageZIO)(Assertion.equalTo("Hello world"))
@@ -32,7 +32,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
         adapterDestination <- ZIO.succeed(actorSystem.adaptedMessageDestination(
           (stringValue: String) => stringValue.length,
           destination))
-        _ <- actorSystem.send("Hello world", adapterDestination)
+        _ <- adapterDestination.send("Hello world")
         result <- resultPromise.await
       } yield result
       assertZIO(sendMessageZIO)(Assertion.equalTo(11))
@@ -42,7 +42,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
         val sendMessageZIO = for {
           actorSystem <- ActorSystem.initialize
           actorMessageDestination <- actorSystem.startActor((string: String) => ZIO.succeed(true))
-          result <- actorSystem.send("Hello world", actorMessageDestination)
+          result <- actorMessageDestination.send("Hello world")
         } yield result
         assertZIO(sendMessageZIO)(Assertion.equalTo(true))
       },
@@ -50,11 +50,11 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
         val sendMessageZIO = for {
           actorSystem <- ActorSystem.initialize
           actorMessageDestination <- actorSystem.startActor((pingMessage: PingMessage) => for {
-            result <- actorSystem.send("Pong!", pingMessage.replyTo)
+            result <- pingMessage.replyTo.send("Pong!")
           } yield result)
           resultPromise <- Promise.make[Throwable, String]
           destination <- ZIO.succeed(actorSystem.promiseMessageDestination(resultPromise))
-          result <- actorSystem.send(PingMessage(destination), actorMessageDestination)
+          result <- actorMessageDestination.send(PingMessage(destination))
           promiseResult <- resultPromise.await
         } yield promiseResult
         assertZIO(sendMessageZIO)(Assertion.equalTo("Pong!"))
@@ -93,8 +93,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
           resultPromise <- Promise.make[Throwable, String]
           destination <- ZIO.succeed(actorSystem.promiseMessageDestination(resultPromise))
           directory <- actorSystem.directory
-          _ <- actorSystem.send(BlackjackSupervisorMessage("Hello", replyTo = destination),
-            directory.blackjackSupervisor.get)
+          _ <- directory.blackjackSupervisor.get.send(BlackjackSupervisorMessage("Hello", replyTo = destination))
         } yield true
         assertZIO(testZIO)(Assertion.equalTo(true))
       }

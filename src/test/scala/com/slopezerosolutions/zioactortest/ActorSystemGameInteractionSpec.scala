@@ -14,9 +14,12 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
 
   case class Card(suit: String, rank: String)
 
+  case class BlackjackTable(player1Hand: List[Card])
+
   abstract sealed class BlackjackGameMessage
 
   case class ShowHand(replyTo: MessageDestination[BlackjackGameMessage]) extends BlackjackGameMessage
+  case class Hit(replyTo: MessageDestination[BlackjackGameMessage]) extends BlackjackGameMessage
 
   case class Hand(hand: List[Card]) extends BlackjackGameMessage
 
@@ -33,6 +36,7 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
         ))
         val testZIO = for {
           actorSystem <- initializeZIO
+          directory <- actorSystem.directory
           startGamePromise <- MessageDestination.promise[String](destination => {
             val handler = (message: BlackjackSupervisorMessage) => message match {
               case StartedBlackJackGameMessage(_) => "Started game"
@@ -41,10 +45,7 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
             val adaptedDestination = actorSystem.adaptedMessageDestination(
               handler,
               destination)
-            for {
-              directory <- actorSystem.directory
-              _ <- directory.blackjackSupervisor.get.send(StartBlackJackGameMessage(adaptedDestination))
-            } yield ()
+            directory.blackjackSupervisor.get.send(StartBlackJackGameMessage(adaptedDestination))
           })
           result <- startGamePromise.await
         } yield result
@@ -73,6 +74,57 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
             rank = "10"
           ))
         )))
+      },
+      test("Can send messages to a stateful game actor created by the supervisor") {
+        val initializeZIO = ActorSystem.initialize(GameDirectory(None, None), List(
+          blackjackSupervisor(dealerGameActor),
+        ))
+        val testZIO = for {
+          actorSystem <- initializeZIO
+          directory <- actorSystem.directory
+          gameStarted <- startBlackjackGame(directory).flatMap(_.await)
+          gameActor = gameStarted.get
+          gameReply1 <- MessageDestination.promise[BlackjackGameMessage](destination => {
+            gameActor.send(Hit(destination))
+          }).flatMap(_.await)
+          gameReply2 <- MessageDestination.promise[BlackjackGameMessage](destination => {
+            gameActor.send(Hit(destination))
+          }).flatMap(_.await)
+          gameReply3 <- MessageDestination.promise[BlackjackGameMessage](destination => {
+            gameActor.send(Hit(destination))
+          }).flatMap(_.await)
+        } yield List(gameReply1,gameReply2, gameReply3)
+
+        val expectedHand1 = Hand(
+          hand = List(Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ))
+        )
+        val expectedHand2 = Hand(
+          hand = List(Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ), Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ))
+        )
+        val expectedHand3 = Hand(
+          hand = List(Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ), Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ), Card(
+            suit = "Hearts",
+            rank = "Queen"
+          ))
+        )
+        assertZIO(testZIO)(Assertion.equalTo(List(expectedHand1,
+          expectedHand2,
+          expectedHand3)))
       }
     )
   )
@@ -100,12 +152,27 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
   private def staticHandGameActor = {
     ActorTemplate.handler((actorSystem, message: BlackjackGameMessage) => message match {
       case ShowHand(replyTo) => for {
-        _ <- actorSystem.send(Hand(List(Card("Hearts", "A"), Card("Hearts", "10"))), replyTo)
+        _ <- replyTo.send(Hand(List(Card("Hearts", "A"), Card("Hearts", "10"))))
       } yield true
       case _ => ZIO.succeed(true)
     })
   }
 
+  private def dealerGameActor = {
+    ActorTemplate.stateful(()=> BlackjackTable(player1Hand = List()),
+      (actorSystem, message: BlackjackGameMessage, table: BlackjackTable) => message match {
+      case ShowHand(replyTo) => for {
+        _ <- replyTo.send(Hand(table.player1Hand))
+      } yield StatefulActor.Continue()
+      case Hit(replyTo) => for {
+        newTable <- ZIO.attempt {
+          table.copy(player1Hand = Card("Hearts", "Queen") +: table.player1Hand)
+        }
+        _ <- replyTo.send(Hand(newTable.player1Hand))
+      } yield StatefulActor.UpdateState(newTable)
+      case _ => ZIO.succeed(StatefulActor.Continue())
+    })
+  }
 
   private def blackjackSupervisor(gameHandler: ActorTemplate[BlackjackGameMessage]) = {
     new ActorInitializer[GameDirectory] {
@@ -118,7 +185,7 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
             case StartBlackJackGameMessage(replyTo) =>
               for {
                 blackjackActor <- actorService.startActor(gameHandler)
-                _ <- actorService.send(StartedBlackJackGameMessage(blackjackActor), replyTo)
+                _ <- replyTo.send(StartedBlackJackGameMessage(blackjackActor))
               } yield true
             case _ => ZIO.succeed(true)
           })

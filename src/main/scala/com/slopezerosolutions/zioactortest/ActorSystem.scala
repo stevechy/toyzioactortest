@@ -33,6 +33,16 @@ object ActorSystem {
         else
           actorLoop(actorCreator, actor, handler).fork
       } yield actor
+    case template: StatefulActorTemplate[T] => for {
+      inbox <- zio.Queue.bounded[T](100)
+      actor <- ZIO.succeed(new Actor(inbox))
+      initialState = template.initialStateSupplier.apply()
+      handler  = template.handler
+      _ <- if (daemonFibre)
+        statefulActorLoop(actorCreator, actor, initialState, handler).forkDaemon
+      else
+        statefulActorLoop(actorCreator, actor, initialState, handler).fork
+    } yield actor
   }
 
   private def actorLoop[T](actorCreator: ActorService, actor: Actor[T], handler: (ActorService, T) => Task[Boolean]): Task[Boolean] = {
@@ -43,6 +53,17 @@ object ActorSystem {
     for {
       _ <- ZIO.iterate[Any, Throwable, Boolean](true)(_ != false)(handleMessage)
     } yield true
+  }
+
+  private def statefulActorLoop[S,T](actorCreator: ActorService, actor: Actor[T], state: S, handler: (ActorService, T, S) => Task[StatefulActor.Result[S]]): Task[Boolean] = {
+    val handleMessage = for {
+      message <- actor.inbox.take
+      result <- handler(actorCreator, message, state)
+    } yield result
+    handleMessage.flatMap {
+      case StatefulActor.Continue() => statefulActorLoop(actorCreator, actor, state, handler)
+      case StatefulActor.UpdateState(newState) => statefulActorLoop(actorCreator, actor, newState, handler)
+    }
   }
 }
 
@@ -81,9 +102,5 @@ class ActorSystem[D] private(actors: TMap[String, Actor[Nothing]], private val d
       actor <- ActorSystem.createActorState(this, template, true)
       actorMessageDestination <- registerActor(actor, actors)
     } yield actorMessageDestination
-  }
-
-  def send[T](message: T, messageDestination: MessageDestination[T]): Task[Boolean] = {
-    messageDestination.send(message)
   }
 }
