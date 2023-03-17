@@ -3,7 +3,7 @@ package com.slopezerosolutions.zioactortest
 import zio.*
 import zio.test.*
 
-class ActorSystemInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
+class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
   case class PingMessage(replyTo: MessageDestination[String])
 
   abstract sealed class BlackjackSupervisorMessage
