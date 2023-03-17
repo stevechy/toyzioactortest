@@ -33,7 +33,7 @@ class ActorSystemInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
         ))
         val testZIO = for {
           actorSystem <- initializeZIO
-          startGamePromise <- actorSystem.withPromiseMessageDestination[String]((destination) => {
+          startGamePromise <- MessageDestination.promise[String](destination => {
             val handler = (message: BlackjackSupervisorMessage) => message match {
               case StartedBlackJackGameMessage(_) => "Started game"
               case _ => "Not started"
@@ -43,7 +43,7 @@ class ActorSystemInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
               destination)
             for {
               directory <- actorSystem.directory
-              _ <- actorSystem.send(StartBlackJackGameMessage(adaptedDestination), directory.blackjackSupervisor.get)
+              _ <- directory.blackjackSupervisor.get.send(StartBlackJackGameMessage(adaptedDestination))
             } yield ()
           })
           result <- startGamePromise.await
@@ -57,20 +57,10 @@ class ActorSystemInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
         val testZIO = for {
           actorSystem <- initializeZIO
           directory <- actorSystem.directory
-          gameStarted <- actorSystem.withPromiseMessageDestination[BlackjackSupervisorMessage]((destination) => {
-            for {
-              _ <- actorSystem.send(StartBlackJackGameMessage(destination), directory.blackjackSupervisor.get)
-            } yield ()
-          })
-          result <- gameStarted.await
-          gameActorMessageDestination = result match {
-            case StartedBlackJackGameMessage(game) => Some(game)
-            case _ => None
-          }
-          gameReply <- actorSystem.withPromiseMessageDestination[BlackjackGameMessage]((destination) => {
-            for {
-              _ <- actorSystem.send(ShowHand(destination), gameActorMessageDestination.get)
-            } yield ()
+          gameStarted <- startBlackjackGame(directory).flatMap(_.await)
+          gameActor = gameStarted.get
+          gameReply <- MessageDestination.promise[BlackjackGameMessage](destination => {
+            gameActor.send(ShowHand(destination))
           })
           hand <- gameReply.await
         } yield hand
@@ -87,8 +77,22 @@ class ActorSystemInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
     )
   )
 
+  private def startBlackjackGame(directory: GameDirectory) = {
+    MessageDestination.promise[Option[MessageDestination[BlackjackGameMessage]]](destination => {
+      val gameStartedDestination = destination.adaptedMessageDestination(gameStartedMessageAdapter)
+      directory.blackjackSupervisor.get.send(StartBlackJackGameMessage(gameStartedDestination))
+    })
+  }
+
+  private val gameStartedMessageAdapter = (result: BlackjackSupervisorMessage) => {
+    result match {
+      case StartedBlackJackGameMessage(game) => Some(game)
+      case _ => None
+    }
+  }
+
   private def noResponseGameActor = {
-    ActorTemplate.handler((actorSystem, message: BlackjackGameMessage) => message match {
+    ActorTemplate.handler((message: BlackjackGameMessage) => message match {
       case _ => ZIO.succeed(true)
     })
   }

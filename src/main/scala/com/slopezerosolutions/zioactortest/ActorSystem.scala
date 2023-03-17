@@ -29,7 +29,7 @@ object ActorSystem {
         inbox <- zio.Queue.bounded[T](100)
         actor <- ZIO.succeed(new Actor(inbox))
         _ <- if (daemonFibre)
-          actorLoop (actorCreator, actor, handler).forkDaemon
+          actorLoop(actorCreator, actor, handler).forkDaemon
         else
           actorLoop(actorCreator, actor, handler).fork
       } yield actor
@@ -51,24 +51,25 @@ class ActorSystem[D] private(actors: TMap[String, Actor[Nothing]], private val d
   def directory: UIO[D] = directoryRef.get
 
   def promiseMessageDestination[T](promise: Promise[Throwable, T]): MessageDestination[T] = {
-    PromiseMessageDestination(promise, this)
+    PromiseMessageDestination(promise)
   }
 
   def adaptedMessageDestination[I, O](adapter: I => O, messageDestination: MessageDestination[O]): MessageDestination[I] = {
-    AdaptedMessageDestination(adapter, messageDestination, this)
+    messageDestination.adaptedMessageDestination(adapter)
   }
-
-  def withPromiseMessageDestination[T](handler: MessageDestination[T] => Task[Unit]): Task[Promise[Throwable, T]] = for {
-    resultPromise <- Promise.make[Throwable, T]
-    _ <- handler(promiseMessageDestination(resultPromise))
-  } yield resultPromise
 
   private def registerActor[T](actor: Actor[T], actors: TMap[String, Actor[Nothing]]): Task[MessageDestination[T]] = for {
     actorId <- ZIO.succeed(java.util.UUID.randomUUID().toString)
     _ <- STM.atomically {
       actors.put(actorId, actor.asInstanceOf[Actor[Nothing]])
     }
-  } yield ActorMessageDestination[T](actorId, this)
+  } yield new ActorMessageDestination[T](actorId, this) {
+    def send(message: T): Task[Boolean] = for {
+      actorOption <- STM.atomically(actors.get(actorId))
+      actor <- ZIO.getOrFail(actorOption)
+      _ <- actor.asInstanceOf[Actor[T]].inbox.offer(message)
+    } yield true
+  }
 
   def startActor[T](handler: T => Task[Boolean]): Task[MessageDestination[T]] = {
     val template = ActorTemplate.handler(handler)
@@ -83,16 +84,6 @@ class ActorSystem[D] private(actors: TMap[String, Actor[Nothing]], private val d
   }
 
   def send[T](message: T, messageDestination: MessageDestination[T]): Task[Boolean] = {
-    messageDestination match {
-      case PromiseMessageDestination(promise, _) => promise.succeed(message)
-      case AdaptedMessageDestination(adapter, messageDestination, _) =>
-        val adaptedMessage = adapter.apply(message)
-        send(adaptedMessage, messageDestination)
-      case ActorMessageDestination(actorId, _) => for {
-        actorOption <- STM.atomically(actors.get(actorId))
-        actor <- ZIO.getOrFail(actorOption)
-        _ <- actor.asInstanceOf[Actor[T]].inbox.offer(message)
-      } yield true
-    }
+    messageDestination.send(message)
   }
 }
