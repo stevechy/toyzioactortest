@@ -63,7 +63,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
     suite("Actor Initializers")(
       test("Creates a fixed set of actors") {
         val initializeZIO = ActorSystem.initialize(GameDirectory(None, None), List(
-          new ActorInitializer[GameDirectory] {
+          new ActorInitializerTemplate[GameDirectory] {
             override type MessageType = BlackjackSupervisorMessage
 
             override def actorTemplate: Task[ActorTemplate[BlackjackSupervisorMessage]] = {
@@ -75,7 +75,7 @@ class ActorSystemSpec extends zio.test.junit.JUnitRunnableSpec {
               directory.copy(blackjackSupervisor = Some(messageDestination))
             }
           },
-          new ActorInitializer[GameDirectory]{
+          new ActorInitializerTemplate[GameDirectory]{
             override type MessageType = PokerSupervisorMessage
 
             override def actorTemplate: Task[ActorTemplate[PokerSupervisorMessage]] = {

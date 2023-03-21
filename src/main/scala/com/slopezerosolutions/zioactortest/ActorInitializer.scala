@@ -4,6 +4,5 @@ import zio.Task
 
 abstract class ActorInitializer[T] {
   type MessageType
-  def actorTemplate: Task[ActorTemplate[MessageType]]
-  def injectActorReference(messageDestination: MessageDestination[MessageType], directory: T): T
+  def initialize: Task[(ActorTemplate[MessageType], (MessageDestination[MessageType],T) => Task[T])]
 }

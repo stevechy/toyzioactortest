@@ -175,7 +175,7 @@ class ActorSystemGameInteractionSpec extends zio.test.junit.JUnitRunnableSpec {
   }
 
   private def blackjackSupervisor(gameHandler: ActorTemplate[BlackjackGameMessage]) = {
-    new ActorInitializer[GameDirectory] {
+    new ActorInitializerTemplate[GameDirectory] {
       override type MessageType = BlackjackSupervisorMessage
 
       override def actorTemplate: Task[ActorTemplate[BlackjackSupervisorMessage]] = {

@@ -15,10 +15,11 @@ object ActorSystem {
     actorSystem <- ZIO.succeed(new ActorSystem(actors, directoryRef))
     newDirectory <- ZIO.foldLeft(initializers)(initialDirectory)(
       (directory: D, initializer: ActorInitializer[D]) => for {
-        template <- initializer.actorTemplate
+        initializerResult <- initializer.initialize
+        (template, injector) = initializerResult
         newActor <- createActorState(actorSystem, template, true)
         actorMessageDestination <- actorSystem.registerActor(newActor, actors)
-        newDirectory <- ZIO.succeed(initializer.injectActorReference(actorMessageDestination, directory))
+        newDirectory <- injector(actorMessageDestination, directory)
       } yield newDirectory)
     _ <- directoryRef.set(newDirectory)
   } yield actorSystem
