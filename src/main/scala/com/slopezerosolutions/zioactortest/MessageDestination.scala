@@ -28,4 +28,4 @@ case class AdaptedMessageDestination[I,O](adapter: I => O, messageDestination: M
     messageDestination.send(adaptedMessage)
   }
 }
-abstract class ActorMessageDestination[T](private val actorId: String, actorService: ActorService) extends MessageDestination[T]
+abstract class ActorMessageDestination[T](val actorId: String, actorService: ActorSystem[_]) extends MessageDestination[T]
