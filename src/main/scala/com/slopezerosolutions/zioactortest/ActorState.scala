@@ -13,4 +13,5 @@ case class ActorState[T](phase: ActorState.Phase,
                          parent: Option[String],
                          children: Set[String],
                          actor: Actor[T],
+                         actorTemplate: ActorTemplate[T],
                          fiber: Fiber[Throwable, Any])

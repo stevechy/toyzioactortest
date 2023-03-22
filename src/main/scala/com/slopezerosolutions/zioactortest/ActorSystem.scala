@@ -34,10 +34,12 @@ object ActorSystem {
     } yield true
   }
 
-  private def statefulActorLoop[S,T](actorCreator: ActorService, actor: Actor[T], state: S, handler: (ActorService, T, S) => Task[StatefulActor.Result[S]]): Task[Boolean] = {
+  private def statefulActorLoop[S, T](actorCreator: ActorService, actor: Actor[T], state: S, handler: (ActorService, T, S) => Task[StatefulActor.Result[S]]): Task[Boolean] = {
     val handleMessage = for {
       message <- actor.inbox.take
-      result <- handler(actorCreator, message, state)
+      result <- handler(actorCreator, message, state).catchAll(error=> for{
+        _ <- ZIO.logError(s"Error received $error")
+      }yield (StatefulActor.Continue()))
     } yield result
     handleMessage.flatMap {
       case StatefulActor.Continue() => statefulActorLoop(actorCreator, actor, state, handler)
@@ -79,17 +81,30 @@ class ActorSystem[D] private(actors: TMap[String, TRef[ActorState[Nothing]]], pr
         _ <- actors.put(actorId, actorStateRef)
       } yield ()
     }
-  } yield new ActorMessageDestination[T](actorId, this) {
-    def send(message: T): Task[Boolean] = for {
-      actorOption <- STM.atomically(actors.get(this.actorId))
-      actorRef <- ZIO.getOrFail(actorOption)
-      actorState <- STM.atomically(actorRef.get)
-      _ <- actorState.actor.asInstanceOf[Actor[T]].inbox.offer(message)
-    } yield true
+  } yield actorMessageDestination[T](actorId)
+
+  private def actorMessageDestination[T](destinationActorId: String): ActorMessageDestination[T] = {
+    new ActorMessageDestination[T](destinationActorId, this) {
+      def send(message: T): Task[Boolean] = for {
+        actorState <- STM.atomically {
+          for {
+            actorOption <- actors.get(actorId)
+            actorRef = actorOption.get
+            actorState <- actorRef.get
+          } yield actorState
+        }
+        inbox = actorState.actor.asInstanceOf[Actor[T]].inbox
+        _ <- inbox.offer(message)
+      } yield true
+    }
   }
 
   private def createActor[T](actorTemplate: ActorTemplate[T], parentActor: Option[String]): Task[ActorState[T]] = {
     val actorId = java.util.UUID.randomUUID().toString
+    createActor(actorTemplate, parentActor, actorId)
+  }
+
+  private def createActor[T](actorTemplate: ActorTemplate[T], parentActor: Option[String], actorId: String): Task[ActorState[T]] = {
     val actorSystem = this
     val actorService = new ActorService {
       override def startActor[M](template: ActorTemplate[M]): Task[MessageDestination[M]] = {
@@ -108,21 +123,25 @@ class ActorSystem[D] private(actors: TMap[String, TRef[ActorState[Nothing]]], pr
         for {
           inbox <- zio.Queue.bounded[T](100)
           actor <- ZIO.succeed(new Actor(actorId, inbox))
-          actorFibre <- if (parentActor.isDefined)
-            ActorSystem.actorLoop(actorService, actor, handler).forkDaemon
-          else
-            ActorSystem.actorLoop(actorService, actor, handler).fork
-        } yield ActorState(phase = ActorState.Running(), parent = parentActor, children = Set(), actor = actor, fiber = actorFibre)
+          actorFibre <- ActorSystem.actorLoop(actorService, actor, handler).forkDaemon
+        } yield ActorState(phase = ActorState.Running(),
+          parent = parentActor,
+          children = Set(),
+          actor = actor,
+          actorTemplate = actorTemplate,
+          fiber = actorFibre)
       case template: StatefulActorTemplate[T] => for {
         inbox <- zio.Queue.bounded[T](100)
         actor <- ZIO.succeed(new Actor(actorId, inbox))
         initialState = template.initialStateSupplier.apply()
         handler = template.handler
-        actorFibre <- if (parentActor.isDefined)
-          ActorSystem.statefulActorLoop(actorService, actor, initialState, handler).forkDaemon
-        else
-          ActorSystem.statefulActorLoop(actorService, actor, initialState, handler).fork
-      } yield ActorState(phase = ActorState.Running(), parent = parentActor, children = Set(), actor = actor, fiber = actorFibre)
+        actorFibre <- ActorSystem.statefulActorLoop(actorService, actor, initialState, handler).forkDaemon
+      } yield ActorState(phase = ActorState.Running(),
+        parent = parentActor,
+        children = Set(),
+        actor = actor,
+        actorTemplate = actorTemplate,
+        fiber = actorFibre)
     }
   }
 
@@ -134,12 +153,57 @@ class ActorSystem[D] private(actors: TMap[String, TRef[ActorState[Nothing]]], pr
     case _ => ZIO.succeed(())
   }
 
+  def restartActor[T](messageDestination: MessageDestination[T]): Task[Option[ActorState[T]]] = messageDestination match {
+    case actorDestination: ActorMessageDestination[T] => for {
+      _ <- suspendActorById(actorDestination.actorId, ActorState.Suspended())
+      suspendedActorState <- STM.atomically {
+        for {
+          actorStateOptionRef <- actors.get(actorDestination.actorId)
+          actorStateRef = actorStateOptionRef.get
+          actorState <- actorStateRef.get
+        } yield actorState
+      }
+      // The restarted actor fiber is a child of the fiber that calls restart, this may not be the parent
+      newActorState <- createActor(suspendedActorState.actorTemplate, suspendedActorState.parent, suspendedActorState.actor.actorId)
+      _ <- STM.atomically {
+        for {
+          actorStateOptionRef <- actors.get(actorDestination.actorId)
+          actorStateRef = actorStateOptionRef.get
+          _ <- actorStateRef.update(actorState => {
+            if (actorState.phase == ActorState.Suspended())
+              newActorState
+            else
+              actorState
+
+          })
+        } yield ()
+      }
+    } yield Some(newActorState.asInstanceOf[ActorState[T]])
+    case _ => ZIO.succeed(None)
+  }
+
   def activeActorDestination[T](messageDestination: MessageDestination[T]): Task[Boolean] =
     messageDestination match {
       case actorDestination: ActorMessageDestination[T] =>
-        STM.atomically { actors.contains(actorDestination.actorId) }
+        for {
+          actorStateOption <- getActorState(actorDestination)
+        } yield actorStateOption.isDefined && actorStateOption.get.phase == ActorState.Running()
       case _ => ZIO.succeed(false)
     }
+
+  private def getActorState[T](actorDestination: ActorMessageDestination[T]): Task[Option[ActorState[Nothing]]] = {
+    STM.atomically {
+      for{
+        actorRefOption <- actors.get(actorDestination.actorId)
+        actorStateOption <- actorRefOption match {
+          case Some(actorRef) => for {
+            actorState <- actorRef.get
+          } yield Some(actorState)
+          case None => STM.succeed(None)
+        }
+      } yield (actorStateOption)
+    }
+  }
 
   private def suspendActorById(actorId: String, nextPhase: ActorState.Phase): Task[Option[ActorState[Nothing]]] =
     for {
@@ -160,12 +224,14 @@ class ActorSystem[D] private(actors: TMap[String, TRef[ActorState[Nothing]]], pr
         case Some(actorState) => (for {
           _ <- actorState.fiber.interrupt
           _ <- actorState.actor.inbox.shutdown
-        } yield ()).fork
+        } yield ())
         case None => ZIO.succeed(())
       }
       _ <- ZIO.foreachDiscard(actorState.toList.flatMap(_.children))(childActorId => for {
         _ <- suspendActorById(childActorId, ActorState.Stopped())
-        _ <- STM.atomically { actors.delete(childActorId) }
+        _ <- STM.atomically {
+          actors.delete(childActorId)
+        }
       } yield ())
     } yield actorState
 

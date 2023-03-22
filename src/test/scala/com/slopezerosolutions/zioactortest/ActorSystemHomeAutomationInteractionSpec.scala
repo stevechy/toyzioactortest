@@ -143,6 +143,37 @@ class ActorSystemHomeAutomationInteractionSpec extends zio.test.junit.JUnitRunna
         _ <- actorSystem.stopActor(houseActor)
         sensorActive <- actorSystem.activeActorDestination(temperatureSensor)
       } yield assertTrue(maxTemp1.celsius == 21 && !sensorActive)
+    },
+    test("Restarting the temperature actor resets its state") {
+      val houseDatabase: List[House] = List(House("123GreenStreet"))
+      val temperatureSensorsDatabase: List[TemperatureSensor] = List(TemperatureSensor("123GreenStreet", "MainFloorSensor"))
+
+      val homeDirectoryInitializer = houseWithSensorsInitializer(houseDatabase, temperatureSensorsDatabase)
+      for {
+        actorSystem <- ActorSystem.initialize(HomeAutomationDirectory(None, None), List(
+          homeDirectoryInitializer
+        ))
+        sensorId = "MainFloorSensor"
+        temperatureSensorOption <- getOrActivateTemperatureSensor(sensorId, actorSystem, temperatureSensorsDatabase)
+        temperatureSensor = temperatureSensorOption.get
+        directory <- actorSystem.directory
+        _ <- STM.atomically {
+          directory.houseRoutes.get.temperatureSensorRoutes.routes.keys
+        }
+        maxTemp1 <- MessageDestination.promise[MaxTemperature](destination => {
+          temperatureSensor.send(RecordTemperature(25, destination))
+        }).flatMap(_.await)
+        maxTemp2 <- MessageDestination.promise[MaxTemperature](destination => {
+          temperatureSensor.send(RecordTemperature(21, destination))
+        }).flatMap(_.await)
+        _ <- actorSystem.restartActor(temperatureSensor)
+        maxTempAfterRestart <- MessageDestination.promise[MaxTemperature](destination => {
+          temperatureSensor.send(RecordTemperature(10, destination))
+        }).flatMap(_.await)
+      } yield assertTrue(maxTemp1.celsius == 25 &&
+        maxTemp2.celsius == 25 &&
+        maxTempAfterRestart.celsius == 10
+      )
     }
   )
 
@@ -226,6 +257,12 @@ class ActorSystemHomeAutomationInteractionSpec extends zio.test.junit.JUnitRunna
 
   private def houseWithSensorsInitializer(houseDatabase: List[House],
                                           temperatureSensorsDatabase: List[TemperatureSensor]) = {
+    houseWithSensorsSupervisor(houseDatabase,
+      temperatureSensorsDatabase,
+      temperatureActorTemplate)
+  }
+
+  private def temperatureActorTemplate = {
     val temperatureActorTemplate = ActorTemplate.stateful[TemperatureSensorCommand, Double](() => Double.MinValue, (actorService, message, maxTemp) => message match {
       case RecordTemperature(celsius, maxTempReply) =>
         for {
@@ -234,10 +271,7 @@ class ActorSystemHomeAutomationInteractionSpec extends zio.test.junit.JUnitRunna
         } yield StatefulActor.UpdateState(newMaxTemp)
       case _ => ZIO.succeed(StatefulActor.Continue())
     })
-
-    houseWithSensorsSupervisor(houseDatabase,
-      temperatureSensorsDatabase,
-      temperatureActorTemplate)
+    temperatureActorTemplate
   }
 
   private def houseWithSensorsSupervisor(houseDatabase: List[House],
